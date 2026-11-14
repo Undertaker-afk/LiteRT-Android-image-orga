@@ -21,6 +21,7 @@ object Notifications {
     const val ID_INDEX = 1001
     const val ID_DOWNLOAD = 1002
     const val ID_RESULT = 1003
+    const val ID_CHAT_DOWNLOAD = 1004
 
     fun createChannel(context: Context) {
         val channel = NotificationChannel(

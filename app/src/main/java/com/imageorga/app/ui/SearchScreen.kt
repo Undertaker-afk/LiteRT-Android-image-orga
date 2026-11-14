@@ -76,7 +76,22 @@ fun SearchScreen(
                 Text(it, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = MaterialTheme.colorScheme.error)
             }
         }
-        if (search.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (search.busy || search.refining) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (search.refining) {
+            Text(
+                "Improving results with the chat model…",
+                Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (search.refinedWith.isNotEmpty()) {
+            Text(
+                "Also searched for: ${search.refinedWith.joinToString(", ")}",
+                Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         val error = search.error
         when {

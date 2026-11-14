@@ -7,6 +7,8 @@ data class IndexProgress(
     val running: Boolean = false,
     val done: Int = 0,
     val total: Int = 0,
+    /** What is being done right now, e.g. "Indexing photos". */
+    val title: String = "Indexing photos",
     /** Why the last run could not do its work, if it could not. */
     val problem: String? = null,
 )
@@ -23,4 +25,7 @@ data class DownloadProgress(
 object Progress {
     val index = MutableStateFlow(IndexProgress())
     val download = MutableStateFlow(DownloadProgress())
+
+    /** Download of the optional chat model. */
+    val llmDownload = MutableStateFlow(DownloadProgress())
 }

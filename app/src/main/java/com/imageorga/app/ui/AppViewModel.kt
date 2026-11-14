@@ -16,6 +16,7 @@ import com.imageorga.app.index.Progress
 import com.imageorga.app.index.Scheduler
 import com.imageorga.app.index.VectorIndex
 import com.imageorga.app.ml.Embedder
+import com.imageorga.app.ml.Llm
 import com.imageorga.app.ml.ModelMissingException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -40,6 +41,9 @@ data class Stats(
     val modelFileName: String = "",
     val modelsOnDiskMb: Long = 0,
     val unusedModelsMb: Long = 0,
+    /** The chat model file for the current settings is on the device. */
+    val chatModelReady: Boolean = false,
+    val chatModelFileName: String = "",
 )
 
 data class SearchState(
@@ -48,6 +52,10 @@ data class SearchState(
     val busy: Boolean = false,
     val results: List<ImageRow> = emptyList(),
     val error: String? = null,
+    /** True while the chat model is working on a better version of the results. */
+    val refining: Boolean = false,
+    /** Phrases the chat model added to the search, when it did. */
+    val refinedWith: List<String> = emptyList(),
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -58,6 +66,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val accelNote = Settings.accelNote
     val indexProgress = Progress.index
     val download = Progress.download
+    val chatDownload = Progress.llmDownload
+    val chatNote = Settings.llmNote
 
     val permissions = MutableStateFlow(Permissions.state(app))
     val images = MutableStateFlow<List<ImageRow>>(emptyList())
@@ -70,6 +80,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var byId: Map<Long, ImageRow> = emptyMap()
     private var cachedQuery: Triple<String, String, FloatArray>? = null
+    private val phraseCache = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     private var sortJob: Job? = null
 
     init {
@@ -81,13 +92,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             // Only the start and end of a download matter here, not every progress tick.
             val downloading = Progress.download.map { it.running }.distinctUntilChanged()
-            combine(Db.version, Settings.flow, downloading) { _, cfg, _ -> cfg }.collectLatest { cfg ->
+            val downloadingChat = Progress.llmDownload.map { it.running }.distinctUntilChanged()
+            combine(Db.version, Settings.flow, downloading, downloadingChat) { _, cfg, _, _ -> cfg }.collectLatest { cfg ->
                 delay(150) // coalesce bursts of changes while indexing
                 val loaded = withContext(Dispatchers.IO) {
                     val all = db.allImages()
                     val file = ModelCatalog.resolve(cfg)
+                    val chatFile = ModelCatalog.resolveLlm(cfg)
                     val files = ModelCatalog.dir(ctx).listFiles().orEmpty()
-                    val unused = files.filter { !it.name.startsWith(file.fileName) }.sumOf { it.length() }
+                    val used = ModelCatalog.usedFileNames(cfg)
+                    val unused = files.filter { f -> used.none { f.name.startsWith(it) } }.sumOf { it.length() }
                     Triple(
                         all, db.categories(),
                         Stats(
@@ -98,6 +112,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             modelFileName = file.fileName,
                             modelsOnDiskMb = files.sumOf { it.length() } / 1_000_000,
                             unusedModelsMb = unused / 1_000_000,
+                            chatModelReady = chatFile?.isReady(ctx) == true,
+                            chatModelFileName = chatFile?.fileName.orEmpty(),
                         )
                     )
                 }
@@ -130,20 +146,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         ?: throw IllegalStateException("This photo has not been indexed yet.")
                     VectorIndex.search(ctx, cfg, v, limit = 60, relativeCut = 0f)
                 } else {
-                    val cached = cachedQuery?.takeIf { it.first == q && it.second == cfg.signature }
-                    val v = cached?.third ?: Embedder.embedQuery(ctx, q).also {
-                        cachedQuery = Triple(q, Settings.current.signature, it)
-                    }
-                    VectorIndex.search(ctx, Settings.current, v, limit = 300, relativeCut = 0.4f)
+                    VectorIndex.search(ctx, Settings.current, queryVector(q, cfg), limit = 300, relativeCut = 0.4f)
                 }
             }
             search.value = SearchState(active = true, results = hits.mapNotNull { byId[it.id] })
+            if (sim == null) refineSearch(q)
         } catch (e: ModelMissingException) {
             search.value = SearchState(active = true, error = "Download the model in Settings to search.")
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (t: Throwable) {
             search.value = SearchState(active = true, error = t.message ?: "Search failed.")
+        }
+    }
+
+    private suspend fun queryVector(q: String, cfg: Config): FloatArray {
+        cachedQuery?.takeIf { it.first == q && it.second == cfg.signature }?.let { return it.third }
+        return Embedder.embedQuery(ctx, q).also { cachedQuery = Triple(q, Settings.current.signature, it) }
+    }
+
+    /**
+     * Second pass of a search, when smart search is on: the chat model names concrete
+     * things the search could mean, and photos matching any of them are ranked together
+     * with the original words. The instant results stay on screen until this is done.
+     */
+    private suspend fun refineSearch(q: String) {
+        val cfg = Settings.current
+        if (!cfg.llmSearch || !Llm.isReady(ctx, cfg)) return
+        // Wait for a pause in typing: the chat model takes a second or two per request.
+        delay(700)
+        search.value = search.value.copy(refining = true)
+        try {
+            val refined = withContext(Dispatchers.Default) {
+                val key = "$q|${Llm.modelKey(cfg)}"
+                val phrases = phraseCache[key] ?: Llm.expand(ctx, q).also { phraseCache[key] = it }
+                if (phrases.isEmpty()) return@withContext null
+                val vectors = listOf(queryVector(q, cfg)) + phrases.map { Embedder.embedQuery(ctx, it) }
+                phrases to VectorIndex.searchMulti(ctx, Settings.current, vectors, limit = 300, relativeCut = 0.4f)
+            }
+            search.value = if (refined == null) {
+                search.value.copy(refining = false)
+            } else {
+                SearchState(active = true, results = refined.second.mapNotNull { byId[it.id] }, refinedWith = refined.first)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            // The instant results are still valid; smart search is a bonus.
+            search.value = search.value.copy(refining = false)
         }
     }
 
@@ -183,6 +233,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (ModelCatalog.resolve(new).isReady(ctx)) Scheduler.indexNow(ctx)
         } else if (old.strictness != new.strictness) {
             resort(delayMs = 400)
+        }
+
+        if (old.llmBackend != new.llmBackend) Settings.clearLlmNote()
+        val chatChanged = old.llmEnabled != new.llmEnabled || old.llmVerify != new.llmVerify ||
+            old.llmModelId != new.llmModelId || old.llmCustomUrl != new.llmCustomUrl || old.llmBackend != new.llmBackend
+        if (chatChanged) {
+            phraseCache.clear()
+            // Sorting depends on whether the chat model takes part; redo it, and let the
+            // background job run any photo checks that are now due.
+            resort(delayMs = 400)
+            if (Llm.isReady(ctx, new) && new.llmVerify) Scheduler.indexNow(ctx)
+        }
+    }
+
+    fun startChatDownload() = Scheduler.downloadChatModel(ctx)
+    fun cancelChatDownload() = Scheduler.cancelChatModelDownload(ctx)
+
+    /** Forgets what the chat model said about photos, so they are looked at again. */
+    fun recheckPhotos() {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.clearChecks()
+            Scheduler.indexNow(ctx)
         }
     }
 

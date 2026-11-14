@@ -19,6 +19,16 @@ data class Config(
     val wifiOnly: Boolean = true,
     /** How clearly a photo must match a category before it is sorted into it. */
     val strictness: Float = DEFAULT_STRICTNESS,
+    /** Use a local chat model (Gemma) to improve sorting and search. */
+    val llmEnabled: Boolean = false,
+    val llmModelId: String = ModelCatalog.DEFAULT_LLM_ID,
+    /** Direct download link of a .litertlm file, used when [llmModelId] is the custom entry. */
+    val llmCustomUrl: String = "",
+    val llmBackend: String = BACKEND_CPU,
+    /** Let the chat model look at each candidate photo before it is sorted into a category. */
+    val llmVerify: Boolean = true,
+    /** Let the chat model turn a search into concrete phrases. */
+    val llmSearch: Boolean = true,
 ) {
     /**
      * Identifies the embedding space. Vectors produced under different signatures are not
@@ -86,6 +96,12 @@ object Settings {
             chargingOnly = prefs.getBoolean("chargingOnly", d.chargingOnly),
             wifiOnly = prefs.getBoolean("wifiOnly", d.wifiOnly),
             strictness = prefs.getFloat("strictness", d.strictness),
+            llmEnabled = prefs.getBoolean("llmEnabled", d.llmEnabled),
+            llmModelId = prefs.getString("llmModelId", d.llmModelId)!!.let { if (ModelCatalog.llmById(it) == null) d.llmModelId else it },
+            llmCustomUrl = prefs.getString("llmCustomUrl", d.llmCustomUrl)!!,
+            llmBackend = prefs.getString("llmBackend", d.llmBackend)!!,
+            llmVerify = prefs.getBoolean("llmVerify", d.llmVerify),
+            llmSearch = prefs.getBoolean("llmSearch", d.llmSearch),
         )
         persist(state.value)
     }
@@ -106,7 +122,26 @@ object Settings {
             .putBoolean("chargingOnly", c.chargingOnly)
             .putBoolean("wifiOnly", c.wifiOnly)
             .putFloat("strictness", c.strictness)
+            .putBoolean("llmEnabled", c.llmEnabled)
+            .putString("llmModelId", c.llmModelId)
+            .putString("llmCustomUrl", c.llmCustomUrl)
+            .putString("llmBackend", c.llmBackend)
+            .putBoolean("llmVerify", c.llmVerify)
+            .putBoolean("llmSearch", c.llmSearch)
             .apply()
+    }
+
+    /** Explains the last automatic fallback of the chat model to CPU, if any. */
+    private val llmNoteState = MutableStateFlow<String?>(null)
+    val llmNote: StateFlow<String?> get() = llmNoteState
+
+    fun llmFallBackToCpu(reason: String) {
+        llmNoteState.value = reason
+        update { it.copy(llmBackend = Config.BACKEND_CPU) }
+    }
+
+    fun clearLlmNote() {
+        llmNoteState.value = null
     }
 
     /** Called right before an accelerator is started; survives a native crash. */

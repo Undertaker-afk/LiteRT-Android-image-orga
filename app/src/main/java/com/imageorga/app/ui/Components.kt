@@ -96,7 +96,7 @@ fun IndexingStrip(vm: AppViewModel) {
     if (!progress.running) return
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
         Text(
-            "Indexing photos · ${progress.done} of ${progress.total}",
+            "${progress.title} · ${progress.done} of ${progress.total}",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

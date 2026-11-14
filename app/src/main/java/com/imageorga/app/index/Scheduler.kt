@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.imageorga.app.data.Settings
 import java.util.concurrent.TimeUnit
 
@@ -18,6 +19,7 @@ import java.util.concurrent.TimeUnit
 object Scheduler {
     private const val INDEX = "index"
     private const val DOWNLOAD = "download"
+    private const val CHAT_DOWNLOAD = "download-chat"
     private const val PERIODIC = "index-periodic"
     private const val TRIGGER = "media-trigger"
 
@@ -61,6 +63,27 @@ object Scheduler {
     fun cancelDownload(context: Context) {
         WorkManager.getInstance(context).cancelUniqueWork(DOWNLOAD)
         Progress.download.value = DownloadProgress()
+    }
+
+    /** Downloads the optional chat model the current settings call for. */
+    fun downloadChatModel(context: Context) {
+        val cfg = Settings.current
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(if (cfg.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
+            .build()
+        Progress.llmDownload.value = DownloadProgress(running = true)
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            CHAT_DOWNLOAD, ExistingWorkPolicy.REPLACE,
+            OneTimeWorkRequestBuilder<DownloadWorker>()
+                .setConstraints(constraints)
+                .setInputData(workDataOf(DownloadWorker.KEY_KIND to DownloadWorker.KIND_CHAT))
+                .build()
+        )
+    }
+
+    fun cancelChatModelDownload(context: Context) {
+        WorkManager.getInstance(context).cancelUniqueWork(CHAT_DOWNLOAD)
+        Progress.llmDownload.value = DownloadProgress()
     }
 
     /**

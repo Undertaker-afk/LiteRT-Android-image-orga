@@ -1,6 +1,7 @@
 package com.imageorga.app.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -55,6 +56,53 @@ class VectorMathTest {
         val a = VectorMath.assign(data, 4, 3, cats, threshold = 0.2f)
         assertEquals(0, a.category[2])
         assertEquals(1, a.category[0])
+    }
+
+    @Test
+    fun candidatesAreOrderedBestFirstAndCapped() {
+        val cats = listOf(listOf(unit(1f, 0f, 0f)), listOf(unit(0.9f, 0.1f, 0f)), listOf(unit(0f, 1f, 0f)))
+        val c = VectorMath.candidates(data, 4, 3, cats, minScore = 0.05f, maxPerRow = 2)
+        // The first "cat" photo matches categories 0 and 1, never the "beach" category.
+        assertEquals(2, c.category[0].size)
+        assertTrue(c.category[0].toSet() == setOf(0, 1))
+        assertTrue(c.score[0][0] >= c.score[0][1])
+        assertEquals(listOf(2), c.category[2].toList())
+        assertEquals(0, c.category[3].size)
+    }
+
+    @Test
+    fun searchMultiKeepsBestPhrasingPerPhoto() {
+        // "cat" finds rows 0 and 1, "beach" finds row 2; together they find all three.
+        val hits = VectorMath.searchMulti(data, 4, 3, listOf(unit(1f, 0f, 0f), unit(0f, 1f, 0f)), limit = 10, relativeCut = 0.4f)
+        assertEquals(setOf(0, 1, 2), hits.map { it.row }.toSet())
+    }
+
+    @Test
+    fun parsesChatModelLists() {
+        assertEquals(
+            listOf("Dogs playing", "Cat sleeping", "Fish"),
+            VectorMath.parsePhraseList("- Dogs playing\n2. Cat sleeping\n* \"Fish\"\n\nHere are some:\n", max = 5),
+        )
+        assertEquals(listOf("a b", "c d"), VectorMath.parsePhraseList("a b, c d, A B", max = 5))
+        assertEquals(2, VectorMath.parsePhraseList("one\ntwo\nthree", max = 2).size)
+    }
+
+    @Test
+    fun parsesYesAndNoInEnglishAndGerman() {
+        assertEquals(true, VectorMath.parseYesNo("Yes."))
+        assertEquals(true, VectorMath.parseYesNo(" ja\n"))
+        assertEquals(false, VectorMath.parseYesNo("No, it does not"))
+        assertEquals(false, VectorMath.parseYesNo("Nein"))
+        assertNull(VectorMath.parseYesNo("I cannot tell"))
+        assertNull(VectorMath.parseYesNo(""))
+    }
+
+    @Test
+    fun categoryTextsIncludeExtraPhrasesOnce() {
+        assertEquals(
+            listOf("Pets", "Pets. cats", "cats", "dogs"),
+            VectorMath.categoryTexts("Pets", "cats", extra = listOf("cats", "dogs", " ")),
+        )
     }
 
     @Test

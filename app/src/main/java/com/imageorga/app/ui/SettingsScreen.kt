@@ -218,6 +218,10 @@ fun SettingsScreen(vm: AppViewModel, actions: PermissionActions) {
             }
         }
 
+        // ---- chat model -----------------------------------------------------------------
+        Section("Smart sorting and search")
+        ChatModelSettings(vm)
+
         // ---- background -----------------------------------------------------------------
         Section("Background indexing")
         SwitchRow(
@@ -233,7 +237,7 @@ fun SettingsScreen(vm: AppViewModel, actions: PermissionActions) {
         Section("Index")
         Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("${stats.indexed} of ${stats.total} photos indexed" + if (stats.failed > 0) " · ${stats.failed} could not be read" else "")
-            IndexingStripInline(progress.running, progress.done, progress.total)
+            IndexingStripInline(progress.running, progress.title, progress.done, progress.total)
             progress.problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (progress.running) {
@@ -321,10 +325,10 @@ private fun <T> ChoiceRow(title: String, detail: String, options: List<T>, selec
 }
 
 @Composable
-private fun IndexingStripInline(running: Boolean, done: Int, total: Int) {
+private fun IndexingStripInline(running: Boolean, title: String, done: Int, total: Int) {
     if (!running) return
     Column {
-        Text("Indexing · $done of $total", style = MaterialTheme.typography.labelMedium)
+        Text("$title · $done of $total", style = MaterialTheme.typography.labelMedium)
         Spacer(Modifier.height(4.dp))
         androidx.compose.material3.LinearProgressIndicator(
             progress = { if (total > 0) done.toFloat() / total else 0f },

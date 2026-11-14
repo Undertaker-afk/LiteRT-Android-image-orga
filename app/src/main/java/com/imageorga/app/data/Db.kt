@@ -36,11 +36,22 @@ data class MediaItem(val id: Long, val name: String, val bucket: String, val dat
 
 class SyncResult(val added: Int, val removed: Int, val changed: Int)
 
+/** A category with what is stored about its vectors and chat-model phrases. */
+class CategoryState(
+    val category: Category,
+    /** Signature the stored vectors were made for, or null when there are none. */
+    val vectorSig: String?,
+    /** Phrases the chat model suggested for this category. */
+    val expanded: List<String>,
+    /** Identifies the category text and chat model the phrases were made for. */
+    val expandedKey: String?,
+)
+
 /** A category together with the vectors its texts were embedded to. */
 class CategoryVector(val category: Category, val vectors: List<FloatArray>)
 
 class Db private constructor(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "imageorga.db", null, 1) {
+    SQLiteOpenHelper(context.applicationContext, "imageorga.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -68,9 +79,27 @@ class Db private constructor(context: Context) :
                 emb BLOB
             )"""
         )
+        createChatModelTables(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createChatModelTables(db)
+    }
+
+    /** Version 2: phrases and photo checks produced by the optional chat model. */
+    private fun createChatModelTables(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE categories ADD COLUMN expanded TEXT")
+        db.execSQL("ALTER TABLE categories ADD COLUMN expanded_key TEXT")
+        db.execSQL(
+            """CREATE TABLE llm_checks(
+                image_id INTEGER NOT NULL,
+                category_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                answer INTEGER NOT NULL,
+                PRIMARY KEY(image_id, category_id)
+            )"""
+        )
+    }
 
     // ---- media sync -------------------------------------------------------------------
 
@@ -290,6 +319,7 @@ class Db private constructor(context: Context) :
         db.beginTransaction()
         try {
             db.delete("categories", "id=?", arrayOf(id.toString()))
+            db.delete("llm_checks", "category_id=?", arrayOf(id.toString()))
             db.execSQL("UPDATE images SET category_id=NULL, manual=0 WHERE category_id=?", arrayOf<Any>(id))
             db.setTransactionSuccessful()
         } finally {
@@ -299,12 +329,62 @@ class Db private constructor(context: Context) :
     }
 
     /** Categories whose text has not been embedded for [sig] yet. */
-    fun categoriesNeedingVector(sig: String): List<Category> {
-        val out = ArrayList<Category>()
+    fun categoryStates(): List<CategoryState> {
+        val out = ArrayList<CategoryState>()
         readableDatabase.rawQuery(
-            "SELECT id, name, description FROM categories WHERE emb IS NULL OR sig IS NULL OR sig != ?", arrayOf(sig)
-        ).use { c -> while (c.moveToNext()) out.add(Category(c.getLong(0), c.getString(1), c.getString(2))) }
+            "SELECT id, name, description, sig, expanded, expanded_key FROM categories ORDER BY id", null
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    CategoryState(
+                        Category(c.getLong(0), c.getString(1), c.getString(2)),
+                        vectorSig = c.getString(3),
+                        expanded = c.getString(4).orEmpty().split('\n').filter { it.isNotBlank() },
+                        expandedKey = c.getString(5),
+                    )
+                )
+            }
+        }
         return out
+    }
+
+    /** Stores the phrases the chat model suggested for a category. */
+    fun saveCategoryExpansion(id: Long, key: String, phrases: List<String>) {
+        writableDatabase.execSQL(
+            "UPDATE categories SET expanded=?, expanded_key=? WHERE id=?",
+            arrayOf<Any>(phrases.joinToString("\n"), key, id)
+        )
+    }
+
+    // ---- chat model photo checks ------------------------------------------------------
+
+    /**
+     * Answers the chat model gave to "does this photo belong in this category?", as
+     * photo id -> category id -> answer. Only answers given for a category's current text
+     * and the current chat model ([validKeys]: category id -> key) are returned.
+     */
+    fun checks(validKeys: Map<Long, String>): HashMap<Long, HashMap<Long, Boolean>> {
+        val out = HashMap<Long, HashMap<Long, Boolean>>()
+        readableDatabase.rawQuery("SELECT image_id, category_id, key, answer FROM llm_checks", null).use { c ->
+            while (c.moveToNext()) {
+                val cat = c.getLong(1)
+                if (validKeys[cat] != c.getString(2)) continue
+                out.getOrPut(c.getLong(0)) { HashMap() }[cat] = c.getInt(3) != 0
+            }
+        }
+        return out
+    }
+
+    fun saveCheck(imageId: Long, categoryId: Long, key: String, answer: Boolean) {
+        writableDatabase.execSQL(
+            "INSERT OR REPLACE INTO llm_checks(image_id, category_id, key, answer) VALUES(?,?,?,?)",
+            arrayOf<Any>(imageId, categoryId, key, if (answer) 1 else 0)
+        )
+    }
+
+    fun clearChecks() {
+        writableDatabase.execSQL("DELETE FROM llm_checks")
+        bump()
     }
 
     /** [vectors] holds one or more vectors of equal length, stored back to back. */
@@ -318,12 +398,14 @@ class Db private constructor(context: Context) :
         writableDatabase.execSQL("UPDATE categories SET sig=?, emb=? WHERE id=?", arrayOf<Any>(sig, toBlob(flat), id))
     }
 
-    fun categoryVectors(sig: String, dim: Int): List<CategoryVector> {
+    /** Vectors of every category whose stored signature is the one wanted for it. */
+    fun categoryVectors(wantedSig: Map<Long, String>, dim: Int): List<CategoryVector> {
         val out = ArrayList<CategoryVector>()
         readableDatabase.rawQuery(
-            "SELECT id, name, description, emb FROM categories WHERE emb IS NOT NULL AND sig = ? ORDER BY id", arrayOf(sig)
+            "SELECT id, name, description, emb, sig FROM categories WHERE emb IS NOT NULL ORDER BY id", null
         ).use { c ->
             while (c.moveToNext()) {
+                if (wantedSig[c.getLong(0)] != c.getString(4)) continue
                 val blob = c.getBlob(3)
                 if (blob.isEmpty() || blob.size % (dim * 4) != 0) continue
                 val buf = ByteBuffer.wrap(blob).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()

@@ -5,6 +5,9 @@ import com.imageorga.app.core.VectorMath
 import com.imageorga.app.data.Config
 import com.imageorga.app.data.Db
 
+/** Per indexed photo: candidate category indices, best first, and their scores. */
+class PhotoCandidates(val ids: LongArray, val category: Array<IntArray>, val score: Array<FloatArray>)
+
 /** A photo id with its similarity to the query. */
 data class ScoredId(val id: Long, val score: Float)
 
@@ -80,12 +83,22 @@ object VectorIndex {
         return VectorMath.search(data, n, dim, query, limit, relativeCut).map { ScoredId(ids[it.row], it.score) }
     }
 
-    /** Sorts every indexed photo into the best matching category; null means unsorted. */
+    /** Ranks photos against several phrasings of one search, keeping each photo's best. */
     @Synchronized
-    fun assign(context: Context, cfg: Config, categoryIds: LongArray, vectors: List<List<FloatArray>>): Pair<LongArray, Array<Long?>> {
+    fun searchMulti(context: Context, cfg: Config, queries: List<FloatArray>, limit: Int, relativeCut: Float): List<ScoredId> {
         ensure(context, cfg)
-        val a = VectorMath.assign(data, n, dim, vectors, cfg.effectiveThreshold)
-        val cats = Array<Long?>(n) { i -> if (a.category[i] < 0) null else categoryIds[a.category[i]] }
-        return ids.copyOf(n) to cats
+        val usable = queries.filter { it.size == dim }
+        return VectorMath.searchMulti(data, n, dim, usable, limit, relativeCut).map { ScoredId(ids[it.row], it.score) }
+    }
+
+    /**
+     * For every indexed photo, the categories it could belong to (as indices into
+     * [vectors]), best first, with scores of at least [minScore].
+     */
+    @Synchronized
+    fun candidates(context: Context, cfg: Config, vectors: List<List<FloatArray>>, minScore: Float): PhotoCandidates {
+        ensure(context, cfg)
+        val c = VectorMath.candidates(data, n, dim, vectors, minScore, maxPerRow = 3)
+        return PhotoCandidates(ids.copyOf(n), c.category, c.score)
     }
 }

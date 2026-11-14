@@ -176,7 +176,7 @@ object Embedder {
      * app's shared library folder can therefore load, say, the Google Tensor connector on
      * a MediaTek phone. The folder made here contains links to the right vendor's files only.
      */
-    private fun prepareNpuLibraryDir(context: Context, notes: MutableList<String>): String {
+    internal fun prepareNpuLibraryDir(context: Context, notes: MutableList<String>): String {
         val chip = ModelCatalog.deviceNpu ?: throw IllegalStateException("This chip has no supported NPU.")
         val source = File(context.applicationInfo.nativeLibraryDir)
         val all = source.listFiles().orEmpty()

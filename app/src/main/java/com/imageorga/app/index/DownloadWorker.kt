@@ -17,58 +17,71 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Downloads the model file the current settings call for, with resume support and a
- * progress notification. When NPU is selected it fetches the build compiled for this
- * device's chip; if no such build is published it switches to CPU and fetches the
- * generic build instead.
+ * Downloads a model file the current settings call for, with resume support and a
+ * progress notification: either the embedding model or the optional chat model.
+ *
+ * When NPU is selected it fetches the build compiled for this device's chip; if no such
+ * build is published it switches to CPU and fetches the generic build instead.
  */
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     private class NotPublished : Exception()
+
+    private val isChatModel get() = inputData.getString(KEY_KIND) == KIND_CHAT
+    private val progress get() = if (isChatModel) Progress.llmDownload else Progress.download
+    private val notificationId get() = if (isChatModel) Notifications.ID_CHAT_DOWNLOAD else Notifications.ID_DOWNLOAD
+    private val what get() = if (isChatModel) "chat model" else "model"
+
+    private fun target(): ModelFile? =
+        if (isChatModel) ModelCatalog.resolveLlm(Settings.current) else ModelCatalog.resolve(Settings.current)
 
     override suspend fun doWork(): Result {
         val ctx = applicationContext
         Settings.init(ctx)
         Notifications.createChannel(ctx)
 
-        var file = ModelCatalog.resolve(Settings.current)
-        if (file.isReady(ctx)) return Result.success()
+        var file = target() ?: return fail("Enter a download link for your model first.")
+        if (file.isReady(ctx)) {
+            progress.value = DownloadProgress()
+            return Result.success()
+        }
 
         try {
             try {
                 download(file)
             } catch (e: NotPublished) {
-                val npu = file.npu ?: throw IOException("Model file not found on the server.")
-                Settings.fallBackToCpu("No NPU build of this model is published for ${npu.label}, so the app uses CPU.")
-                file = ModelCatalog.resolve(Settings.current)
+                val npu = file.npu ?: throw e
+                val reason = "No NPU build of this model is published for ${npu.label}, so the app uses CPU."
+                if (isChatModel) Settings.llmFallBackToCpu(reason) else Settings.fallBackToCpu(reason)
+                file = target() ?: throw e
                 if (!file.isReady(ctx)) download(file)
             }
         } catch (e: NotPublished) {
-            return fail("Model file not found on the server.")
+            return fail("The file was not found at its download address.")
         } catch (e: IOException) {
             Log.w(TAG, "download interrupted", e)
-            Progress.download.value = Progress.download.value.copy(running = false, error = "Download interrupted: ${e.message}. It resumes automatically.")
-            Notifications.cancel(ctx, Notifications.ID_DOWNLOAD)
+            progress.value = progress.value.copy(running = false, error = "Download interrupted: ${e.message}. It resumes automatically.")
+            Notifications.cancel(ctx, notificationId)
             return if (runAttemptCount < 5) Result.retry() else Result.failure()
         } catch (t: Throwable) {
             Log.w(TAG, "download failed", t)
             return fail(t.message ?: t.javaClass.simpleName)
         }
 
-        Notifications.cancel(ctx, Notifications.ID_DOWNLOAD)
-        if (isStopped) {
-            Progress.download.value = DownloadProgress()
-            return Result.success()
-        }
-        Progress.download.value = DownloadProgress()
-        Notifications.post(ctx, Notifications.ID_RESULT, Notifications.result(ctx, "Model ready", "Indexing your photos now."))
+        Notifications.cancel(ctx, notificationId)
+        progress.value = DownloadProgress()
+        if (isStopped) return Result.success()
+        Notifications.post(
+            ctx, Notifications.ID_RESULT,
+            Notifications.result(ctx, if (isChatModel) "Chat model ready" else "Model ready", if (isChatModel) "Checking your photos now." else "Indexing your photos now."),
+        )
         Scheduler.indexNow(ctx)
         return Result.success()
     }
 
     private fun fail(message: String): Result {
-        Progress.download.value = DownloadProgress(error = message)
-        Notifications.cancel(applicationContext, Notifications.ID_DOWNLOAD)
+        progress.value = DownloadProgress(error = message)
+        Notifications.cancel(applicationContext, notificationId)
         return Result.failure()
     }
 
@@ -91,6 +104,10 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
             conn.disconnect()
             throw NotPublished()
         }
+        if (code == 401 || code == 403) {
+            conn.disconnect()
+            throw IllegalStateException("The server refused the download ($code). The file may need a login.")
+        }
         if (code != 200 && code != 206) {
             conn.disconnect()
             throw IOException("Server answered $code")
@@ -106,17 +123,17 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
         val cancel = WorkManager.getInstance(ctx).createCancelPendingIntent(id)
         fun notification(bytes: Long) = Notifications.progress(
-            ctx, "Downloading model",
+            ctx, "Downloading $what",
             if (total > 0) "${bytes / 1_000_000} of ${total / 1_000_000} MB" else "${bytes / 1_000_000} MB",
             if (total > 0) (bytes * 1000 / total).toInt() else 0,
             if (total > 0) 1000 else 0,
             cancel,
         )
-        Progress.download.value = DownloadProgress(true, file.fileName, offset, total)
+        progress.value = DownloadProgress(true, file.fileName, offset, total)
         try {
-            setForeground(Notifications.foreground(Notifications.ID_DOWNLOAD, notification(offset)))
+            setForeground(Notifications.foreground(notificationId, notification(offset)))
         } catch (t: Throwable) {
-            Notifications.post(ctx, Notifications.ID_DOWNLOAD, notification(offset))
+            Notifications.post(ctx, notificationId, notification(offset))
         }
 
         try {
@@ -135,8 +152,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         val t = SystemClock.elapsedRealtime()
                         if (t - lastUi > 500) {
                             lastUi = t
-                            Progress.download.value = DownloadProgress(true, file.fileName, bytes, total)
-                            Notifications.post(ctx, Notifications.ID_DOWNLOAD, notification(bytes))
+                            progress.value = DownloadProgress(true, file.fileName, bytes, total)
+                            Notifications.post(ctx, notificationId, notification(bytes))
                         }
                     }
                 }
@@ -165,7 +182,9 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         return conn
     }
 
-    private companion object {
-        const val TAG = "DownloadWorker"
+    companion object {
+        private const val TAG = "DownloadWorker"
+        const val KEY_KIND = "kind"
+        const val KIND_CHAT = "chat"
     }
 }
