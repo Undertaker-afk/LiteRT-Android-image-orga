@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Image Orga</string>
+    <string name="channel_progress">Indexing and downloads</string>
+    <string name="channel_progress_desc">Progress while photos are indexed or a model is downloaded</string>
+</resources>
