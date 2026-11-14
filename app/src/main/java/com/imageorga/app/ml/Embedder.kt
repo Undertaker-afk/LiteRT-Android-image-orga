@@ -180,7 +180,9 @@ object Embedder {
         val chip = ModelCatalog.deviceNpu ?: throw IllegalStateException("This chip has no supported NPU.")
         val source = File(context.applicationInfo.nativeLibraryDir)
         val all = source.listFiles().orEmpty()
-        val wanted = all.filter { f ->
+        // Compiler plugins are only for compiling models on the device; the downloaded
+        // NPU builds are already compiled.
+        val wanted = all.filter { !it.name.contains("CompilerPlugin") }.filter { f ->
             when (chip.vendor) {
                 "MediaTek" -> f.name.contains("MediaTek", ignoreCase = true)
                 "Qualcomm" -> f.name.contains("Qualcomm", ignoreCase = true) || f.name.startsWith("libQnn")

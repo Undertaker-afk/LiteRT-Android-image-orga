@@ -62,7 +62,13 @@ kotlin {
 
 dependencies {
     // On-device embedding runtime (LiteRT-LM) used to run EmbeddingGemma 2.
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.19.1")
+    //
+    // Keep this at 0.18.x until newer NPU connectors are published: from 0.19.0 the
+    // runtime only loads connectors that export LiteRtDispatchQueryInterface, while the
+    // newest published connectors (litert-npu-runtime-* 2.3.2, below) still export the
+    // older LiteRtDispatchGetApi. With 0.19.x every NPU start fails with
+    // "undefined symbol: LiteRtDispatchQueryInterface".
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.1")
 
     // NPU support. The first three connect LiteRT to each vendor's NPU; Tensor and
     // MediaTek phones ship the rest of the runtime in the system image, Qualcomm's
