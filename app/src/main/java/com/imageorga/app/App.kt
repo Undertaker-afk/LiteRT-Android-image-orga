@@ -9,6 +9,7 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         Settings.init(this)
+        com.imageorga.app.ml.Diagnostics.init(this)
         Notifications.createChannel(this)
         Scheduler.applyAutoIndex(this)
     }

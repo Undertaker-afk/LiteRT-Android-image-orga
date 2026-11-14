@@ -121,37 +121,89 @@ object Embedder {
         // If the vendor driver crashes the process, the next launch sees this marker and
         // stays on CPU instead of crashing again.
         Settings.markAccelStarting(cfg.backend)
+        val notes = ArrayList<String>()
+        val failures = ArrayList<Pair<String, Throwable>>()
         val attempts: List<Pair<Backend, Backend>> = if (cfg.backend == Config.BACKEND_NPU) {
-            val libDir = context.applicationInfo.nativeLibraryDir
-            // Qualcomm's runtime finds its DSP-side libraries through this variable.
-            try {
-                Os.setenv("ADSP_LIBRARY_PATH", libDir, true)
+            val libDir = try {
+                prepareNpuLibraryDir(context, notes)
             } catch (t: Throwable) {
-                Log.w(TAG, "setenv failed", t)
+                failures.add("preparing NPU libraries" to t)
+                null
             }
-            listOf(
-                Backend.NPU(libDir) to Backend.NPU(libDir),
-                // Some chip builds keep the text part on CPU and only run vision on the NPU.
-                Backend.CPU() to Backend.NPU(libDir),
-            )
+            if (libDir == null) {
+                emptyList()
+            } else {
+                // Qualcomm's runtime finds its DSP-side libraries through this variable.
+                try {
+                    Os.setenv("ADSP_LIBRARY_PATH", context.applicationInfo.nativeLibraryDir, true)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "setenv failed", t)
+                }
+                listOf(
+                    Backend.NPU(libDir) to Backend.NPU(libDir),
+                    // Some chip builds keep the text part on CPU and only run vision on the NPU.
+                    Backend.CPU() to Backend.NPU(libDir),
+                )
+            }
         } else {
             listOf(Backend.GPU() to Backend.GPU())
         }
-        var last: Throwable? = null
         for ((text, vision) in attempts) {
             try {
                 val e = create(context, cfg, text, vision)
                 Settings.markAccelStarted()
                 Settings.clearAccelNote()
+                Diagnostics.clear(context)
                 return e
             } catch (t: Throwable) {
                 if (t is ModelMissingException) throw t
                 Log.w(TAG, "$name start failed (text=${text.name}, vision=${vision.name})", t)
-                last = t
+                failures.add("text on ${text.name}, vision on ${vision.name}" to t)
             }
         }
-        Settings.fallBackToCpu("$name acceleration could not start on this device, so the app switched to CPU. (${last?.message?.take(160) ?: "unknown error"})")
+        notes.add("Model file: ${file.fileName}")
+        Diagnostics.record(context, "$name acceleration could not start", failures, notes)
+        Settings.fallBackToCpu("$name acceleration could not start on this device, so the app switched to CPU.")
         return null
+    }
+
+    /**
+     * Builds a folder holding only the NPU libraries of this device's chip vendor and
+     * returns its path.
+     *
+     * The app bundles the connector libraries of all three vendors, but the runtime takes
+     * whichever connector it finds first in the folder it is given. Pointing it at the
+     * app's shared library folder can therefore load, say, the Google Tensor connector on
+     * a MediaTek phone. The folder made here contains links to the right vendor's files only.
+     */
+    private fun prepareNpuLibraryDir(context: Context, notes: MutableList<String>): String {
+        val chip = ModelCatalog.deviceNpu ?: throw IllegalStateException("This chip has no supported NPU.")
+        val source = File(context.applicationInfo.nativeLibraryDir)
+        val all = source.listFiles().orEmpty()
+        val wanted = all.filter { f ->
+            when (chip.vendor) {
+                "MediaTek" -> f.name.contains("MediaTek", ignoreCase = true)
+                "Qualcomm" -> f.name.contains("Qualcomm", ignoreCase = true) || f.name.startsWith("libQnn")
+                else -> f.name.contains("GoogleTensor", ignoreCase = true) || f.name.contains("google_tensor", ignoreCase = true)
+            }
+        }
+        notes.add("Bundled libraries: ${all.map { it.name }.sorted().joinToString(", ").ifEmpty { "none found in ${source.path}" }}")
+        notes.add("Used for ${chip.label}: ${wanted.map { it.name }.sorted().joinToString(", ").ifEmpty { "none" }}")
+        if (wanted.none { it.name.startsWith("libLiteRtDispatch") }) {
+            throw IllegalStateException("The NPU connector library for ${chip.vendor} is missing from the app.")
+        }
+        val target = File(context.filesDir, "npu-libs")
+        target.deleteRecursively()
+        target.mkdirs()
+        for (f in wanted) {
+            val link = File(target, f.name)
+            try {
+                Os.symlink(f.absolutePath, link.absolutePath)
+            } catch (t: Throwable) {
+                f.copyTo(link, overwrite = true)
+            }
+        }
+        return target.absolutePath
     }
 
     private fun create(context: Context, cfg: Config, text: Backend, vision: Backend): EmbeddingEngine {

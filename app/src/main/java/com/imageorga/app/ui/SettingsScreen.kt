@@ -169,6 +169,21 @@ fun SettingsScreen(vm: AppViewModel, actions: PermissionActions) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             accelNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+            val hasReport by com.imageorga.app.ml.Diagnostics.available.collectAsStateWithLifecycle()
+            if (hasReport) {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                OutlinedButton(onClick = {
+                    val report = com.imageorga.app.ml.Diagnostics.read(context) ?: return@OutlinedButton
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(android.content.Intent.EXTRA_SUBJECT, "Image Orga acceleration error")
+                        .putExtra(android.content.Intent.EXTRA_TEXT, report)
+                    try {
+                        context.startActivity(android.content.Intent.createChooser(send, "Share error details"))
+                    } catch (_: Exception) {
+                    }
+                }) { Text("Share error details") }
+            }
         }
 
         // ---- quality --------------------------------------------------------------------
